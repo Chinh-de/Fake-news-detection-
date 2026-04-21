@@ -29,7 +29,7 @@ TEST_CSV = os.path.join(DATA_DIR, "test.csv")
 # SLM model path (pre-trained checkpoint)
 MODEL_PATH = os.environ.get(
     "MRCD_MODEL_PATH",
-    "/kaggle/input/models/chinhde/roberta-fine-v2/pytorch/default/1",
+    "bert-base-uncased",  # Changed from RoBERTa to BERT for EANN
 )
 
 # ============================================================
