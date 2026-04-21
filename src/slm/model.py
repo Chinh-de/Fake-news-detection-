@@ -283,6 +283,7 @@ class IntegratedSLM:
         optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
 
         history = {"train_loss": []}
+        loss_fn = torch.nn.BCELoss()
 
         for _ in range(epochs):
             epoch_loss = 0.0
