@@ -1,61 +1,57 @@
-﻿"""
-Integrated SLM (Small Language Model) wrapper.
-EANN-based binary classifier for fake news detection (from FTT-ACL23).
+"""
+Integrated SLM (Small Language Model) wrapper — FTT edition.
+Fake-news detector based on the FTT-ACL23 BERT model:
+    BERT (last-layer fine-tunable) + MaskAttention + MLP binary head
+    trained with instance-weighted cross-entropy loss (InstanceWeightedBCELoss).
 
-Supports HuggingFace Transformers backend.
+Replaces the previous EANN-based SLM in the MRCD framework.
+Inference interface is unchanged so runner.py / finetune.py need no edits.
 """
 
 import os
-import numpy as np
+from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.optim import AdamW
-from torch.utils.data import DataLoader
+from torch.optim import Adam
 from transformers import BertModel, BertTokenizer
 
 from src.config import MODEL_PATH, SLM_BACKEND
-from src.slm.dataset import FakeNewsDataset
 from src.utils import preprocess_text
 
 
-# Copy necessary classes from FTT-ACL23
-class ReverseLayerF(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input_, alpha):
-        ctx.alpha = alpha
-        return input_
+# ============================================================
+# Building-block layers  (identical to FTT-ACL23/models/layers.py)
+# ============================================================
 
-    @staticmethod
-    def backward(ctx, grad_output):
-        output = grad_output.neg() * ctx.alpha
-        return output, None
+class MLP(nn.Module):
+    """Multi-layer perceptron with ReLU activations and dropout."""
 
-
-class MLP(torch.nn.Module):
-    def __init__(self, input_dim, embed_dims, dropout, output_layer=True):
+    def __init__(self, input_dim: int, embed_dims: list, dropout: float, output_layer: bool = True):
         super().__init__()
-        layers = list()
+        layers = []
         for embed_dim in embed_dims:
-            layers.append(torch.nn.Linear(input_dim, embed_dim))
-            layers.append(torch.nn.ReLU())
-            layers.append(torch.nn.Dropout(p=dropout))
+            layers.append(nn.Linear(input_dim, embed_dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(p=dropout))
             input_dim = embed_dim
         if output_layer:
-            layers.append(torch.nn.Linear(input_dim, 1))
-        self.mlp = torch.nn.Sequential(*layers)
+            layers.append(nn.Linear(input_dim, 1))
+        self.mlp = nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp(x)
 
 
-class MaskAttention(torch.nn.Module):
-    def __init__(self, input_shape):
-        super(MaskAttention, self).__init__()
-        self.attention_layer = torch.nn.Linear(input_shape, 1)
+class MaskAttention(nn.Module):
+    """Masked-softmax attention pooling over token sequence."""
 
-    def forward(self, inputs, mask=None):
+    def __init__(self, input_shape: int):
+        super().__init__()
+        self.attention_layer = nn.Linear(input_shape, 1)
+
+    def forward(self, inputs: torch.Tensor, mask: Optional[torch.Tensor] = None):
         scores = self.attention_layer(inputs).view(-1, inputs.size(1))
         if mask is not None:
             scores = scores.masked_fill(mask == 0, float("-inf"))
@@ -64,131 +60,289 @@ class MaskAttention(torch.nn.Module):
         return outputs, scores
 
 
-class EANNBertModel(torch.nn.Module):
-    """ EANN Model Using BERT as Text Encoder
+# ============================================================
+# Core FTT Model  (identical to FTT-ACL23/models/bert.py: BERTModel)
+# ============================================================
+
+class FTTBertModel(nn.Module):
+    """BERT + MaskAttention + MLP binary classifier (FTT architecture).
+
+    Only the last encoder layer (layer 11) is fine-tuned;
+    all other BERT parameters are frozen.
     """
-    def __init__(self, emb_dim, mlp_dims, dropout, bert_path, domain_num):
-        super(EANNBertModel, self).__init__()
-        self.bert = BertModel.from_pretrained(bert_path).requires_grad_(False)
 
+    def __init__(self, emb_dim: int, mlp_dims: list, dropout: float, bert_path: str):
+        super().__init__()
+        self.bert = BertModel.from_pretrained(bert_path)
+        # Freeze all BERT parameters, then unfreeze only layer-11
         for name, param in self.bert.named_parameters():
-            if name.startswith("encoder.layer.11"):
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
+            param.requires_grad = name.startswith("encoder.layer.11")
 
-        self.classifier = MLP(emb_dim, mlp_dims, dropout)
-        self.domain_classifier = nn.Sequential(MLP(emb_dim, mlp_dims, dropout, False), torch.nn.ReLU(),
-                        torch.nn.Linear(mlp_dims[-1], domain_num))
+        self.mlp = MLP(emb_dim, mlp_dims, dropout)
         self.attention = MaskAttention(emb_dim)
-    
-    def forward(self, alpha, **kwargs):
-        inputs = kwargs['content']
-        masks = kwargs['content_masks']
-        bert_feature = self.bert(inputs, attention_mask = masks)[0]
-        bert_feature, _ = self.attention(bert_feature, masks)
 
-        output = self.classifier(bert_feature)
-        reverse = ReverseLayerF.apply
+    def forward(self, **kwargs) -> torch.Tensor:
+        inputs = kwargs["content"]           # (B, seq_len)
+        masks  = kwargs["content_masks"]     # (B, seq_len)
+        bert_out = self.bert(inputs, attention_mask=masks)[0]   # (B, seq_len, H)
+        pooled, _ = self.attention(bert_out, masks)             # (B, H)
+        output = self.mlp(pooled)                               # (B, 1)
+        return torch.sigmoid(output.squeeze(1))                 # (B,)
 
-        reverse_res = reverse(bert_feature, alpha)
 
-        domain_pred = self.domain_classifier(reverse(bert_feature, alpha))
-        return torch.sigmoid(output.squeeze(1)), domain_pred
+# ============================================================
+# Instance-weighted BCE loss  (identical to FTT-ACL23/models/bert.py)
+# ============================================================
 
+class InstanceWeightedBCELoss(nn.Module):
+    """BCE loss with per-sample weighting for FTT-style training."""
+
+    def __init__(self):
+        super().__init__()
+        self.loss = nn.BCELoss(reduction="none")
+
+    def forward(self, pred: torch.Tensor, ground: torch.Tensor,
+                instance_weight: torch.Tensor) -> torch.Tensor:
+        unweighted = self.loss(pred, ground)
+        return torch.mean(unweighted * instance_weight)
+
+
+# ============================================================
+# IntegratedSLM — public wrapper used by MRCD pipeline
+# ============================================================
 
 class IntegratedSLM:
-    """
-    Wrapper for EANN-based SLM with inference and fine-tuning capabilities.
+    """FTT-based SLM wrapper with inference and fine-tuning for MRCD.
 
     Args:
-        model_path: Path to pre-trained BERT model.
-        domain_num: Number of domains for adversarial training.
+        model_path: HuggingFace model id or local path to BERT checkpoint.
+        backend: Ignored (kept for API compatibility).
     """
 
-    def __init__(self, model_path: str = MODEL_PATH, backend: str = None, domain_num: int = 4):
+    def __init__(self, model_path: str = MODEL_PATH, backend: str = None):
         self.backend = backend or SLM_BACKEND
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.domain_num = domain_num
-        self._loaded_model_path = None
+        self.device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._loaded_model_path: Optional[str] = None
 
-        local_model_path = model_path if os.path.exists(model_path) else None
-        if local_model_path is not None:
-            print(f"Loading SLM from local path: {local_model_path}")
-            resolved_model_path = local_model_path
-        else:
-            print(f"Loading SLM from Hugging Face model id: {model_path}")
-            resolved_model_path = model_path
+        resolved = model_path if os.path.exists(model_path) else model_path
+        print(f"[FTT-SLM] Initialising from: {resolved}")
+        self._init_model(resolved)
 
-        self._init_hf(resolved_model_path)
+    # ------------------------------------------------------------------
+    # Internal initialisation
+    # ------------------------------------------------------------------
 
-    def _init_hf(self, model_path: str):
+    def _init_model(self, model_path: str):
         self.tokenizer = BertTokenizer.from_pretrained(model_path)
-        self.model = EANNBertModel(
+        self.model = FTTBertModel(
             emb_dim=768,
-            mlp_dims=[256],
-            dropout=0.1,
+            mlp_dims=[384],   # matches FTT-ACL23 default (dim 384)
+            dropout=0.2,
             bert_path=model_path,
-            domain_num=self.domain_num
         )
         self.model.to(self.device)
         self.model.eval()
         self._loaded_model_path = model_path
-        print(f"SLM loaded (EANN HF backend) on {self.device}")
+        print(f"[FTT-SLM] Model loaded on {self.device}")
 
-    def _inference_hf(self, text: str) -> tuple:
-        clean_text = preprocess_text(text)
-        inputs = self.tokenizer(
-            clean_text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=128,
+    # ------------------------------------------------------------------
+    # Tokenisation helper
+    # ------------------------------------------------------------------
+
+    def _tokenise(self, texts: list, max_length: int = 170):
+        """Tokenise a list of texts and return input tensors on device."""
+        enc = self.tokenizer(
+            texts,
+            max_length=max_length,
             padding="max_length",
+            truncation=True,
+            return_tensors="pt",
         )
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        return {k: v.to(self.device) for k, v in enc.items()}
 
+    # ------------------------------------------------------------------
+    # Inference  (unchanged public API for MRCD pipeline)
+    # ------------------------------------------------------------------
+
+    def inference(self, text: str) -> tuple:
+        """Single-sample inference.
+
+        Returns:
+            (pred: int, conf: float, probs: [p_fake, p_real])
+        """
+        clean = preprocess_text(text)
+        enc   = self._tokenise([clean])
+        self.model.eval()
         with torch.no_grad():
-            output, _ = self.model(alpha=-1, content=inputs['input_ids'], content_masks=inputs['attention_mask'])
-            probs = output.cpu().numpy()
-        pred = int(probs[0] > 0.5)
-        conf = max(probs[0], 1 - probs[0])
-        return pred, conf, [probs[0], 1 - probs[0]]
+            prob = self.model(
+                content=enc["input_ids"],
+                content_masks=enc["attention_mask"],
+            ).item()
+        pred = int(prob > 0.5)
+        conf = max(prob, 1.0 - prob)
+        return pred, conf, [prob, 1.0 - prob]
 
-    def _inference_hf_batch(self, texts: list[str], batch_size: int = 32) -> list[tuple]:
+    def inference_batch(self, texts: list, batch_size: int = 32) -> list:
+        """Batch inference.
+
+        Returns:
+            List of (pred, conf, probs) tuples, one per input text.
+        """
         clean_texts = [preprocess_text(t) for t in texts]
         results = []
-
         self.model.eval()
         with torch.no_grad():
             for i in range(0, len(clean_texts), batch_size):
-                batch_texts = clean_texts[i : i + batch_size]
-                inputs = self.tokenizer(
-                    batch_texts,
-                    max_length=128,
-                    padding=True,
-                    truncation=True,
-                    return_tensors="pt",
-                )
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
-
-                outputs, _ = self.model(alpha=-1, content=inputs['input_ids'], content_masks=inputs['attention_mask'])
-                probs = outputs.cpu().numpy()
-
-                for prob in probs:
-                    pred = int(prob > 0.5)
-                    conf = max(prob, 1 - prob)
-                    results.append((pred, conf, [prob, 1 - prob]))
-
+                batch = clean_texts[i : i + batch_size]
+                enc   = self._tokenise(batch)
+                probs = self.model(
+                    content=enc["input_ids"],
+                    content_masks=enc["attention_mask"],
+                ).cpu().numpy()
+                for p in probs:
+                    results.append((int(p > 0.5), float(max(p, 1.0 - p)), [float(p), float(1.0 - p)]))
         return results
 
-    # ================================================================
-    # Public Interface
-    # ================================================================
-    def inference(self, text: str) -> tuple:
-        return self._inference_hf(text)
+    # ------------------------------------------------------------------
+    # FTT-style weighted training  (Phase 1 — called by the notebook)
+    # ------------------------------------------------------------------
 
-    def inference_batch(self, texts: list[str], batch_size: int = 32) -> list[tuple]:
-        return self._inference_hf_batch(texts, batch_size)
+    def finetune_weighted(
+        self,
+        train_texts: list,
+        train_labels: list,
+        train_weights: list,
+        epochs: int = 50,
+        batch_size: int = 64,
+        lr: float = 2e-5,
+        weight_decay: float = 5e-5,
+        early_stop: int = 5,
+        val_texts: list = None,
+        val_labels: list = None,
+        save_path: str = None,
+    ) -> dict:
+        """Train the FTT detector with instance-weighted BCE loss.
+
+        This implements Bước 5 of FTT:
+        - Minimises weighted cross-entropy loss (InstanceWeightedBCELoss).
+        - Adam optimiser, lr=2e-5, early-stop on validation macro-F1.
+
+        Args:
+            train_texts:   Raw news texts for training.
+            train_labels:  Binary labels (0=real, 1=fake).
+            train_weights: Per-sample weights from FTT reweighting pipeline.
+            val_texts / val_labels: Optional validation set for early-stop.
+            save_path: Directory to save best model checkpoint.
+
+        Returns:
+            dict with training statistics.
+        """
+        from sklearn.metrics import f1_score
+
+        assert len(train_texts) == len(train_labels) == len(train_weights), \
+            "texts, labels and weights must have the same length"
+
+        loss_fn   = InstanceWeightedBCELoss()
+        optimizer = Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
+
+        # Preprocess texts
+        clean_texts = [preprocess_text(t) for t in train_texts]
+        clean_val   = [preprocess_text(t) for t in val_texts] if val_texts else None
+
+        best_f1   = 0.0
+        no_improve = 0
+        history   = {"train_loss": [], "val_f1": []}
+
+        for epoch in range(epochs):
+            self.model.train()
+            epoch_loss = 0.0
+            n_batches  = 0
+
+            # Shuffle order each epoch
+            idx = np.random.permutation(len(clean_texts)).tolist()
+            for start in range(0, len(idx), batch_size):
+                batch_idx = idx[start : start + batch_size]
+                batch_texts   = [clean_texts[i] for i in batch_idx]
+                batch_labels  = torch.tensor(
+                    [train_labels[i]  for i in batch_idx], dtype=torch.float, device=self.device
+                )
+                batch_weights = torch.tensor(
+                    [train_weights[i] for i in batch_idx], dtype=torch.float, device=self.device
+                )
+
+                enc  = self._tokenise(batch_texts)
+                pred = self.model(content=enc["input_ids"], content_masks=enc["attention_mask"])
+                loss = loss_fn(pred, batch_labels, batch_weights)
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                epoch_loss += loss.item()
+                n_batches  += 1
+
+            avg_loss = epoch_loss / max(1, n_batches)
+            history["train_loss"].append(avg_loss)
+
+            # Validation / early-stop
+            val_f1 = 0.0
+            if clean_val is not None and val_labels is not None:
+                val_f1 = self._eval_f1(clean_val, val_labels)
+                history["val_f1"].append(val_f1)
+                print(f"[FTT] Epoch {epoch+1}/{epochs} | loss={avg_loss:.4f} | val_f1={val_f1:.4f}")
+
+                if val_f1 > best_f1:
+                    best_f1 = val_f1
+                    no_improve = 0
+                    if save_path:
+                        os.makedirs(save_path, exist_ok=True)
+                        torch.save(
+                            self.model.state_dict(),
+                            os.path.join(save_path, "parameter_bert.pkl"),
+                        )
+                else:
+                    no_improve += 1
+                    if no_improve >= early_stop:
+                        print(f"[FTT] Early stop at epoch {epoch+1}")
+                        break
+            else:
+                print(f"[FTT] Epoch {epoch+1}/{epochs} | loss={avg_loss:.4f}")
+
+        # Load best checkpoint if saved
+        ckpt = os.path.join(save_path, "parameter_bert.pkl") if save_path else None
+        if ckpt and os.path.exists(ckpt):
+            self.model.load_state_dict(torch.load(ckpt, map_location=self.device))
+            print(f"[FTT] Loaded best checkpoint from {ckpt}")
+
+        self.model.eval()
+        return {
+            "trained": True,
+            "samples": len(train_texts),
+            "epochs_run": epoch + 1,
+            "best_val_f1": best_f1,
+            "train_loss_history": history["train_loss"],
+            "val_f1_history": history.get("val_f1", []),
+        }
+
+    def _eval_f1(self, texts: list, labels: list, batch_size: int = 64) -> float:
+        """Compute macro-F1 on a given text/label set."""
+        from sklearn.metrics import f1_score as sk_f1
+        preds = []
+        self.model.eval()
+        with torch.no_grad():
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i : i + batch_size]
+                enc = self._tokenise(batch)
+                probs = self.model(
+                    content=enc["input_ids"],
+                    content_masks=enc["attention_mask"],
+                ).cpu().numpy()
+                preds.extend([int(p > 0.5) for p in probs])
+        return sk_f1(labels, preds, average="macro")
+
+    # ------------------------------------------------------------------
+    # MRCD fine-tuning on D_clean  (called by pipeline/finetune.py)
+    # ------------------------------------------------------------------
 
     def finetune_on_clean(
         self,
@@ -198,170 +352,66 @@ class IntegratedSLM:
         lr: float = 1e-5,
         weight_decay: float = 0.01,
     ) -> dict:
-        valid_samples = [
-            s
-            for s in clean_samples
-            if s.get("text") is not None and s.get("label") in [0, 1]
-        ]
-        if not valid_samples:
+        """Fine-tune on MRCD clean pool (uniform weights, 1 epoch by default).
+
+        Each sample in clean_samples is a dict with keys 'text' and 'label'.
+        """
+        valid = [s for s in clean_samples if s.get("text") and s.get("label") in [0, 1]]
+        if not valid:
             return {"trained": False, "reason": "no_valid_samples"}
 
-        texts = [preprocess_text(s["text"]) for s in valid_samples]
-        labels = [int(s["label"]) for s in valid_samples]
-        domains = [s.get("domain", 0) for s in valid_samples]  # Default domain if not provided
+        texts   = [preprocess_text(s["text"])  for s in valid]
+        labels  = [int(s["label"]) for s in valid]
+        weights = [1.0] * len(valid)   # uniform weight for MRCD clean samples
 
-        optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
-        loss_fn = torch.nn.BCELoss()
-
-        total_loss = 0.0
-        total_steps = 0
+        loss_fn   = InstanceWeightedBCELoss()
+        optimizer = Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
+        total_loss, total_steps = 0.0, 0
 
         for _ in range(epochs):
             self.model.train()
-            alpha = max(2. / (1. + np.exp(-10 * _ / epochs)) - 1, 1e-1)
+            idx = np.random.permutation(len(texts)).tolist()
+            for start in range(0, len(idx), batch_size):
+                batch_idx = idx[start : start + batch_size]
+                batch_texts   = [texts[i]   for i in batch_idx]
+                batch_labels  = torch.tensor([labels[i]  for i in batch_idx], dtype=torch.float, device=self.device)
+                batch_weights = torch.tensor([weights[i] for i in batch_idx], dtype=torch.float, device=self.device)
 
-            for i in range(0, len(texts), batch_size):
-                batch_texts = texts[i:i+batch_size]
-                batch_labels = torch.tensor(labels[i:i+batch_size], dtype=torch.float).to(self.device)
-                batch_domains = torch.tensor(domains[i:i+batch_size], dtype=torch.long).to(self.device)
-
-                inputs = self.tokenizer(
-                    batch_texts,
-                    max_length=128,
-                    padding=True,
-                    truncation=True,
-                    return_tensors="pt",
-                )
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
-
-                pred, domain_pred = self.model(alpha=alpha, content=inputs['input_ids'], content_masks=inputs['attention_mask'])
-                loss = loss_fn(pred, batch_labels)
-                loss_adv = F.nll_loss(F.log_softmax(domain_pred, dim=1), batch_domains)
-                loss = loss + loss_adv
+                enc  = self._tokenise(batch_texts)
+                pred = self.model(content=enc["input_ids"], content_masks=enc["attention_mask"])
+                loss = loss_fn(pred, batch_labels, batch_weights)
 
                 optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 optimizer.step()
 
-                total_loss += float(loss.item())
+                total_loss  += loss.item()
                 total_steps += 1
 
         self.model.eval()
-        avg_loss = total_loss / max(1, total_steps)
         return {
             "trained": True,
-            "samples": len(valid_samples),
+            "samples": len(valid),
             "epochs": epochs,
             "batch_size": batch_size,
             "lr": lr,
             "weight_decay": weight_decay,
-            "avg_loss": avg_loss,
+            "avg_loss": total_loss / max(1, total_steps),
         }
 
-    def finetune(
-        self,
-        train_texts: list[str],
-        train_labels: list[int],
-        model_init: str = "bert-base-uncased",
-        epochs: int = 4,
-        batch_size: int = 32,
-        lr: float = 1e-3,
-        weight_decay: float = 1e-4,
-        warmup_ratio: float = 0.1,
-        max_grad_norm: float = 1.0,
-        save_path: str | None = None,
-    ) -> dict:
-        if len(train_texts) != len(train_labels):
-            raise ValueError("train_texts vÃ  train_labels pháº£i cÃ¹ng sá»‘ lÆ°á»£ng")
-        if len(train_texts) == 0:
-            return {"trained": False, "reason": "no_train_data"}
+    # ------------------------------------------------------------------
+    # Checkpoint utilities
+    # ------------------------------------------------------------------
 
-        if self._loaded_model_path != model_init:
-            self._init_hf(model_init)
+    def save(self, save_path: str):
+        """Save model weights to directory."""
+        os.makedirs(save_path, exist_ok=True)
+        torch.save(self.model.state_dict(), os.path.join(save_path, "parameter_bert.pkl"))
+        print(f"[FTT-SLM] Checkpoint saved → {save_path}")
 
-        optimizer = AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
-
-        history = {"train_loss": []}
-        loss_fn = torch.nn.BCELoss()
-
-        for _ in range(epochs):
-            epoch_loss = 0.0
-            self.model.train()
-            alpha = max(2. / (1. + np.exp(-10 * _ / epochs)) - 1, 1e-1)
-
-            for i in range(0, len(train_texts), batch_size):
-                batch_texts = train_texts[i:i+batch_size]
-                batch_labels = torch.tensor(train_labels[i:i+batch_size], dtype=torch.float).to(self.device)
-                batch_domains = torch.tensor([0] * len(batch_texts), dtype=torch.long).to(self.device)  # Default domain
-
-                inputs = self.tokenizer(
-                    batch_texts,
-                    max_length=128,
-                    padding=True,
-                    truncation=True,
-                    return_tensors="pt",
-                )
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
-
-                pred, domain_pred = self.model(alpha=alpha, content=inputs['input_ids'], content_masks=inputs['attention_mask'])
-                loss = loss_fn(pred, batch_labels)
-                loss_adv = F.nll_loss(F.log_softmax(domain_pred, dim=1), batch_domains)
-                loss = loss + loss_adv
-
-                optimizer.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
-                optimizer.step()
-
-                epoch_loss += float(loss.item())
-
-            avg_train_loss = epoch_loss / max(1, len(train_texts) // batch_size)
-            history["train_loss"].append(avg_train_loss)
-
-        if save_path:
-            os.makedirs(save_path, exist_ok=True)
-            torch.save(self.model.state_dict(), os.path.join(save_path, 'parameter_eann.pkl'))
-
+    def load(self, checkpoint_path: str):
+        """Load model weights from a .pkl file."""
+        self.model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
         self.model.eval()
-
-        result = {
-            "trained": True,
-            "samples": len(train_texts),
-            "epochs": epochs,
-            "batch_size": batch_size,
-            "lr": lr,
-            "weight_decay": weight_decay,
-            "train_loss_history": history["train_loss"],
-        }
-        if save_path:
-            result["save_path"] = save_path
-
-        return result
-
-    def fnetune(
-        self,
-        train_texts: list[str],
-        train_labels: list[int],
-        model_init: str = "bert-base-uncased",
-        epochs: int = 4,
-        batch_size: int = 32,
-        lr: float = 1e-3,
-        weight_decay: float = 1e-4,
-        warmup_ratio: float = 0.1,
-        max_grad_norm: float = 1.0,
-        save_path: str | None = None,
-    ) -> dict:
-        return self.finetune(
-            train_texts=train_texts,
-            train_labels=train_labels,
-            model_init=model_init,
-            epochs=epochs,
-            batch_size=batch_size,
-            lr=lr,
-            weight_decay=weight_decay,
-            warmup_ratio=warmup_ratio,
-            max_grad_norm=max_grad_norm,
-            save_path=save_path,
-        )
-
+        print(f"[FTT-SLM] Checkpoint loaded ← {checkpoint_path}")
