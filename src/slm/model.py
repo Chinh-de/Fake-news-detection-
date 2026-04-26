@@ -349,12 +349,18 @@ class IntegratedSLM:
         clean_samples: list,
         epochs: int = 1,
         batch_size: int = 32,
-        lr: float = 1e-5,
+        lr: float = 2e-6,
         weight_decay: float = 0.01,
+        val_texts: list = None,
+        val_labels: list = None,
     ) -> dict:
-        """Fine-tune on MRCD clean pool (uniform weights, 1 epoch by default).
+        """Fine-tune on MRCD clean pool with confidence-based weights.
 
-        Each sample in clean_samples is a dict with keys 'text' and 'label'.
+        Each sample in clean_samples is a dict with keys 'text', 'label',
+        and optionally 'conf_slm' for confidence-weighted training.
+
+        Uses a very low learning rate (2e-6) to preserve FTT-learned
+        temporal representations while adapting to clean pool supervision.
         """
         valid = [s for s in clean_samples if s.get("text") and s.get("label") in [0, 1]]
         if not valid:
@@ -362,7 +368,14 @@ class IntegratedSLM:
 
         texts   = [preprocess_text(s["text"])  for s in valid]
         labels  = [int(s["label"]) for s in valid]
-        weights = [1.0] * len(valid)   # uniform weight for MRCD clean samples
+        # Use SLM confidence as sample weight (preserves FTT spirit)
+        weights = [float(s.get("conf_slm", 0.8)) for s in valid]
+
+        # Save pre-finetune state for possible rollback
+        pre_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+        pre_f1 = None
+        if val_texts is not None and val_labels is not None:
+            pre_f1 = self._eval_f1(val_texts, val_labels)
 
         loss_fn   = InstanceWeightedBCELoss()
         optimizer = Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -389,6 +402,19 @@ class IntegratedSLM:
                 total_loss  += loss.item()
                 total_steps += 1
 
+        # Rollback if validation F1 dropped (prevents catastrophic forgetting)
+        rolled_back = False
+        post_f1 = None
+        if pre_f1 is not None:
+            self.model.eval()
+            post_f1 = self._eval_f1(val_texts, val_labels)
+            if post_f1 < pre_f1 - 0.01:  # allow tiny margin
+                self.model.load_state_dict(pre_state)
+                rolled_back = True
+                print(f"[MRCD] Rollback! val_f1 dropped {pre_f1:.4f} → {post_f1:.4f}")
+            else:
+                print(f"[MRCD] Finetune kept: val_f1 {pre_f1:.4f} → {post_f1:.4f}")
+
         self.model.eval()
         return {
             "trained": True,
@@ -398,7 +424,19 @@ class IntegratedSLM:
             "lr": lr,
             "weight_decay": weight_decay,
             "avg_loss": total_loss / max(1, total_steps),
+            "pre_f1": pre_f1,
+            "post_f1": post_f1,
+            "rolled_back": rolled_back,
         }
+
+    def _eval_f1(self, texts: list, labels: list) -> float:
+        """Compute binary F1 on given texts/labels (used for rollback check)."""
+        from sklearn.metrics import f1_score
+        preds = []
+        results = self.inference_batch(texts, batch_size=64)
+        for pred, conf, _ in results:
+            preds.append(pred)
+        return f1_score(labels, preds, average="binary", zero_division=0)
 
     # ------------------------------------------------------------------
     # Checkpoint utilities
