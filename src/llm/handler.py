@@ -11,6 +11,7 @@ from src.config import (
     LLM_MAX_NEW_TOKENS,
     LLM_TEMPERATURE,
     LLM_TOP_P,
+    LLM_BACKEND,
 )
 from src.llm.base import BaseLLM
 
@@ -116,25 +117,87 @@ class LocalLLM(BaseLLM):
         return response.strip()
 
 
+# # ============================================================
+# # Singleton Accessor
+# # ============================================================
+# _current_llm = None
+
+
+# def get_llm(model_name: str = None) -> BaseLLM:
+#     """
+#     Lấy hoặc tạo mới một singleton Global LLM.
+    
+     
+#     1. Kiểm tra biến toàn cục _current_llm.
+#     2. Nếu chưa tồn tại (_current_llm is None), khởi tạo instance LocalLLM mới.
+#     3. Trả về instance LLM hiện tại.
+    
+#     Args:
+#         model_name: Ghi đè tên mô hình. Nếu None, sử dụng LLM_MODEL_NAME từ .env.
+#     """
+#     global _current_llm
+#     if _current_llm is None:
+#         _current_llm = LocalLLM(model_name)
+#     return _current_llm
 # ============================================================
-# Singleton Accessor
+# vLLM Backend (optional dependency)
+# ============================================================
+try:
+    from vllm import LLM, SamplingParams
+
+    class VLLMHandler(BaseLLM):
+        """vLLM backend for high-performance inference."""
+
+        def __init__(self, model_name: str = None):
+            self.model_name = model_name or LLM_MODEL_NAME
+            self.llm = None
+            self.sampling_params = None
+            self._load_model()
+
+        def _load_model(self):
+            print(f"[vLLM] Initializing with model: {self.model_name}")
+            self.llm = LLM(
+                model=self.model_name,
+                max_model_len=8192,
+                trust_remote_code=True,
+                gpu_memory_utilization=0.9,
+                tensor_parallel_size=1,
+                swap_space=4,
+                enforce_eager=True,
+            )
+            self.sampling_params = SamplingParams(
+                temperature=LLM_TEMPERATURE,
+                max_tokens=LLM_MAX_NEW_TOKENS,
+                top_p=LLM_TOP_P,
+            )
+            print("[vLLM] Model loaded successfully")
+
+        def generate_text(self, prompt: str, max_output_tokens: int = LLM_MAX_NEW_TOKENS) -> str:
+            if self.llm is None:
+                raise RuntimeError("vLLM model not initialized.")
+            outputs = self.llm.generate([prompt], self.sampling_params)
+            return outputs[0].outputs[0].text.strip()
+
+except ImportError:
+    VLLMHandler = None
+
+
+# ============================================================
+# Singleton Accessor with Backend Selection
 # ============================================================
 _current_llm = None
 
-
 def get_llm(model_name: str = None) -> BaseLLM:
     """
-    Lấy hoặc tạo mới một singleton Global LLM.
-    
-     
-    1. Kiểm tra biến toàn cục _current_llm.
-    2. Nếu chưa tồn tại (_current_llm is None), khởi tạo instance LocalLLM mới.
-    3. Trả về instance LLM hiện tại.
-    
-    Args:
-        model_name: Ghi đè tên mô hình. Nếu None, sử dụng LLM_MODEL_NAME từ .env.
+    Get singleton LLM instance based on LLM_BACKEND config.
+    Supported backends: "hf" (default) or "vllm".
     """
     global _current_llm
     if _current_llm is None:
-        _current_llm = LocalLLM(model_name)
+        if LLM_BACKEND == "vllm":
+            if VLLMHandler is None:
+                raise ImportError("vLLM is not installed. Run: pip install vllm")
+            _current_llm = VLLMHandler(model_name)
+        else:
+            _current_llm = LocalLLM(model_name)
     return _current_llm

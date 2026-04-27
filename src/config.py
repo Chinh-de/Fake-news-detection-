@@ -50,7 +50,7 @@ LLM_TOP_P = 1.0
 # SLM Backend Configuration
 # ============================================================
 # "hf" for HuggingFace Transformers, "vllm" for vLLM
-SLM_BACKEND = os.environ.get("SLM_BACKEND", "hf")
+SLM_BACKEND = os.environ.get("SLM_BACKEND", "vllm")
 
 # ============================================================
 # Pipeline Hyperparameters

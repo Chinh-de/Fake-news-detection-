@@ -17,3 +17,5 @@ sentence-transformers
 python-dotenv
 requests
 huggingface-hub
+vllm    
+ray
