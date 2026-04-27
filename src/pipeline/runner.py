@@ -242,8 +242,6 @@ def run_mrcd_pipeline(
         )
 
         if split_clean_noisy(state, confidence_threshold):
-            # Use SLM label (not LLM) since FTT-SLM is more accurate (~70% vs ~50%)
-            state["label"] = pred
             state["status"] = "clean"
             d_clean.append(state)
             # Ghi log kết quả ngay lập tức để tiết kiệm RAM
@@ -346,8 +344,6 @@ def run_mrcd_pipeline(
             )
 
             if split_clean_noisy(state, confidence_threshold):
-                # Use SLM label (not LLM) since FTT-SLM is more accurate
-                state["label"] = pred
                 state["status"] = f"clean@round{round_id}"
                 d_clean.append(state)
                 promoted_clean += 1

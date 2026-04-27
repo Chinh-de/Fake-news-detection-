@@ -1,11 +1,8 @@
 """
 Integrated SLM (Small Language Model) wrapper — FTT edition.
 Fake-news detector based on the FTT-ACL23 BERT model:
-    BERT (last-layer fine-tunable) + MaskAttention + MLP binary head
-    trained with instance-weighted cross-entropy loss (InstanceWeightedBCELoss).
-
-Replaces the previous EANN-based SLM in the MRCD framework.
-Inference interface is unchanged so runner.py / finetune.py need no edits.
+    BERT (fully trainable) + Average Pooling + MLP binary head
+    trained with instance-weighted cross-entropy loss.
 """
 
 import os
@@ -22,7 +19,7 @@ from src.utils import preprocess_text
 
 
 # ============================================================
-# Building-block layers  (identical to FTT-ACL23/models/layers.py)
+# Building-block layers
 # ============================================================
 
 class MLP(nn.Module):
@@ -44,54 +41,46 @@ class MLP(nn.Module):
         return self.mlp(x)
 
 
-class MaskAttention(nn.Module):
-    """Masked-softmax attention pooling over token sequence."""
-
-    def __init__(self, input_shape: int):
-        super().__init__()
-        self.attention_layer = nn.Linear(input_shape, 1)
-
-    def forward(self, inputs: torch.Tensor, mask: Optional[torch.Tensor] = None):
-        scores = self.attention_layer(inputs).view(-1, inputs.size(1))
-        if mask is not None:
-            scores = scores.masked_fill(mask == 0, float("-inf"))
-        scores = torch.softmax(scores, dim=-1).unsqueeze(1)
-        outputs = torch.matmul(scores, inputs).squeeze(1)
-        return outputs, scores
-
-
 # ============================================================
-# Core FTT Model  (identical to FTT-ACL23/models/bert.py: BERTModel)
+# Core FTT Model (exactly as described in FTT-ACL23 paper)
 # ============================================================
 
 class FTTBertModel(nn.Module):
-    """BERT + MaskAttention + MLP binary classifier (FTT architecture).
+    """BERT + Average Pooling + MLP binary classifier (FTT architecture).
 
-    Only the last encoder layer (layer 11) is fine-tuned;
-    all other BERT parameters are frozen.
+    As described in the paper:
+    - BERT is trainable (no freezing)
+    - Output = average representation of non-padded tokens
+    - MLP with sigmoid for final prediction
     """
 
     def __init__(self, emb_dim: int, mlp_dims: list, dropout: float, bert_path: str):
         super().__init__()
         self.bert = BertModel.from_pretrained(bert_path)
-        # Freeze all BERT parameters, then unfreeze only layer-11
-        for name, param in self.bert.named_parameters():
-            param.requires_grad = name.startswith("encoder.layer.11")
+        # BERT is trainable (no freezing) - as per paper
+        # (All parameters have requires_grad=True by default)
 
         self.mlp = MLP(emb_dim, mlp_dims, dropout)
-        self.attention = MaskAttention(emb_dim)
 
     def forward(self, **kwargs) -> torch.Tensor:
         inputs = kwargs["content"]           # (B, seq_len)
         masks  = kwargs["content_masks"]     # (B, seq_len)
+
         bert_out = self.bert(inputs, attention_mask=masks)[0]   # (B, seq_len, H)
-        pooled, _ = self.attention(bert_out, masks)             # (B, H)
-        output = self.mlp(pooled)                               # (B, 1)
-        return torch.sigmoid(output.squeeze(1))                 # (B,)
+
+        # Average pooling over non-padded tokens (as per paper)
+        # Expand mask to same dimension as bert_out
+        mask_expanded = masks.unsqueeze(-1).expand(bert_out.size()).float()  # (B, seq_len, H)
+        sum_embeddings = torch.sum(bert_out * mask_expanded, dim=1)          # (B, H)
+        sum_mask = torch.sum(mask_expanded, dim=1)                           # (B, H)
+        pooled = sum_embeddings / sum_mask.clamp(min=1e-9)                   # (B, H)
+
+        output = self.mlp(pooled)               # (B, 1)
+        return torch.sigmoid(output.squeeze(1)) # (B,)
 
 
 # ============================================================
-# Instance-weighted BCE loss  (identical to FTT-ACL23/models/bert.py)
+# Instance-weighted BCE loss (identical to paper)
 # ============================================================
 
 class InstanceWeightedBCELoss(nn.Module):
@@ -136,7 +125,7 @@ class IntegratedSLM:
         self.tokenizer = BertTokenizer.from_pretrained(model_path)
         self.model = FTTBertModel(
             emb_dim=768,
-            mlp_dims=[384],   # matches FTT-ACL23 default (dim 384)
+            mlp_dims=[384],   # matches FTT-ACL23 default
             dropout=0.2,
             bert_path=model_path,
         )
@@ -223,7 +212,7 @@ class IntegratedSLM:
     ) -> dict:
         """Train the FTT detector with instance-weighted BCE loss.
 
-        This implements Bước 5 of FTT:
+        This implements the training procedure from FTT paper:
         - Minimises weighted cross-entropy loss (InstanceWeightedBCELoss).
         - Adam optimiser, lr=2e-5, early-stop on validation macro-F1.
 
@@ -349,7 +338,7 @@ class IntegratedSLM:
         clean_samples: list,
         epochs: int = 1,
         batch_size: int = 32,
-        lr: float = 2e-6,
+        lr: float = 2e-5,
         weight_decay: float = 0.01,
         val_texts: list = None,
         val_labels: list = None,
