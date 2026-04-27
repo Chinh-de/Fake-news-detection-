@@ -16,5 +16,5 @@ curl-cffi
 sentence-transformers
 python-dotenv
 requests
-huggingface-hub>=0.23.0
-vllm>=0.5.0    
+huggingface-hub
+vllm
