@@ -338,7 +338,7 @@ class IntegratedSLM:
         clean_samples: list,
         epochs: int = 1,
         batch_size: int = 32,
-        lr: float = 3e-5,
+        lr: float = 4e-5,
         weight_decay: float = 0.01,
         val_texts: list = None,
         val_labels: list = None,
