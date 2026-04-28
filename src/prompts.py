@@ -53,37 +53,32 @@ def build_classification_prompt(
     knowledge_k: str,
     demos: list,
 ) -> str:
-    """
-    Xây dựng prompt phân loại chung. Nội dung tri thức đã được xử lý bên ngoài.
-    """
-    # 1. HEADER
+    # Giới hạn knowledge để tránh quá dài
+    max_knowledge_len = 2000
+    if len(knowledge_k) > max_knowledge_len:
+        knowledge_k = knowledge_k[:max_knowledge_len] + "... (truncated)"
+
     header = f"""You are an advanced AI fake news detector.
 
-BACKGROUND KNOWLEDGE:
+BACKGROUND KNOWLEDGE (use this as the source of truth):
 {knowledge_k}
 
 INSTRUCTIONS:
-Classify the following news article as either Real or Fake.
-- "Real" means the article is factually accurate and trustworthy.
-- "Fake" means the article is fabricated, misleading, or unverified.
+You will classify a news article as either Real or Fake.
+- **Real** means the article is factually accurate and consistent with the background knowledge.
+- **Fake** means the article is fabricated, misleading, unverified, or contradicts the background knowledge.
 
-STRICT RULE: Only output ONE word: "Real" or "Fake". 
-No preamble, no explanation, no punctuation.
-Just the word.
+STRICT RULE: Output ONLY one word: "Real" or "Fake". No preamble, no punctuation. Just the word.
 
 EXAMPLES:"""
 
-    # 2. FEW-SHOT DEMOS
-    examples = _build_demo_section(demos)
+    examples = _build_demo_section(demos)  # cần sửa _build_demo_section bỏ dấu ...
 
-    # 3. TAIL & TARGET
     tail = f"""
-----------------------------------------
 TARGET ARTICLE TO CLASSIFY:
 Text: "{text.strip()}"
 
 Label:"""
-
     return header + examples + tail
 
 

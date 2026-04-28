@@ -57,7 +57,7 @@ SLM_BACKEND = os.environ.get("SLM_BACKEND", "hf")
 # ============================================================
 # Pipeline Hyperparameters
 # ============================================================
-CONFIDENCE_THRESHOLD = 0.7
+CONFIDENCE_THRESHOLD = 0.8
 NUM_LOOP = 3
 TOP_K_DEMOS = 4
 FACT_TOP_K = 3
@@ -75,7 +75,7 @@ CRAWL_MAX_WORKERS = min(8, max(2, (os.cpu_count() or 4)))
 ENABLE_SLM_FINETUNE = True
 SLM_FINETUNE_EPOCHS = 1
 SLM_FINETUNE_BATCH_SIZE = 32
-SLM_FINETUNE_LR = 2e-5
+SLM_FINETUNE_LR = 1e-6
 SLM_FINETUNE_WEIGHT_DECAY = 0.01
 SLM_FINETUNE_MIN_SAMPLES = 16
 
