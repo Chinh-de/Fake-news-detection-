@@ -338,7 +338,7 @@ class IntegratedSLM:
         clean_samples: list,
         epochs: int = 1,
         batch_size: int = 32,
-        lr: float = 2e-5,
+        lr: float = 2e-6,
         weight_decay: float = 0.01,
         val_texts: list = None,
         val_labels: list = None,
@@ -419,13 +419,13 @@ class IntegratedSLM:
         }
 
     def _eval_f1(self, texts: list, labels: list) -> float:
-        """Compute binary F1 on given texts/labels (used for rollback check)."""
+        """Compute macro F1 on given texts/labels (used for rollback check)."""
         from sklearn.metrics import f1_score
         preds = []
         results = self.inference_batch(texts, batch_size=64)
         for pred, conf, _ in results:
             preds.append(pred)
-        return f1_score(labels, preds, average="binary", zero_division=0)
+        return f1_score(labels, preds, average="macro", zero_division=0)
 
     # ------------------------------------------------------------------
     # Checkpoint utilities
