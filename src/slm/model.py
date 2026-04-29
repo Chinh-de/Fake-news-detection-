@@ -336,7 +336,7 @@ class IntegratedSLM:
     def finetune_on_clean(
         self,
         clean_samples: list,
-        epochs: int = 1,
+        epochs: int = 5,
         batch_size: int = 32,
         lr: float = 1e-6,
         weight_decay: float = 0.01,
