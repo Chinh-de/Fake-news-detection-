@@ -50,8 +50,10 @@ def generate_demo_label(text: str = None) -> str:
     2. Sử dụng random.choice để chọn ngẫu nhiên một nhãn.
     3. Trả về nhãn được chọn dưới dạng chuỗi (str).
     """
-    return random.choice(ALL_SYNONYM_LABELS)
-
+    if random.random() < 0.5:
+        return random.choice(REAL_SYNONYM_LABELS)
+    else:
+        return random.choice(FAKE_SYNONYM_LABELS)
 
 def to_clean_demo_label(binary_label: int) -> str:
     """

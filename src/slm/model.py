@@ -205,7 +205,6 @@ class IntegratedSLM:
         batch_size: int = 32,
         lr: float = 2e-5,
         weight_decay: float = 0.01,
-        early_stop: int = 5,
         save_path: str = None,
     ) -> dict:
         """Train the FTT detector with instance-weighted BCE loss.

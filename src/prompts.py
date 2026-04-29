@@ -68,6 +68,9 @@ You will classify a news article as either Real or Fake.
 - **Real** means the article is factually accurate and consistent with the background knowledge.
 - **Fake** means the article is fabricated, misleading, unverified, or contradicts the background knowledge.
 
+IMPORTANT: In the examples below, labels like "True", "Authentic", "Genuine", "Factual" correspond to **Real**.
+Labels like "Fake", "False", "Hoax", "Misleading", "Unsubstantiated" correspond to **Fake**.
+
 STRICT RULE: Output ONLY one word: "Real" or "Fake". No preamble, no punctuation. Just the word.
 
 EXAMPLES:"""
@@ -99,7 +102,19 @@ def _build_demo_section(demos: list) -> str:
 
     examples = ""
     for i, demo in enumerate(demos, start=1):
-        label_str = demo.get("label", "Unknown")
+        raw_label = demo.get("label", "Unknown")
+        # Chuyển đổi từ đồng nghĩa thành "Real" hoặc "Fake"
+        if raw_label.lower() in ["true", "authentic", "genuine", "factual", "real"]:
+            display_label = "Real"
+        elif raw_label.lower() in ["fake", "false", "hoax", "misleading", "unsubstantiated"]:
+            display_label = "Fake"
+        else:
+            display_label = raw_label  # fallback
         text_demo = demo.get("text", "")[:1000].strip()
-        examples += f'\n[Example {i}]\nText: "{text_demo}..."\nLabel: {label_str}\n'
+        examples += f'\n[Example {i}]\nText: "{text_demo}..."\nLabel: {display_label}\n'
     return examples
+    # for i, demo in enumerate(demos, start=1):
+    #     label_str = demo.get("label", "Unknown")
+    #     text_demo = demo.get("text", "")[:1000].strip()
+    #     examples += f'\n[Example {i}]\nText: "{text_demo}..."\nLabel: {label_str}\n'
+    # return examples
