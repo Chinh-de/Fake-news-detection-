@@ -23,8 +23,6 @@ def maybe_finetune_slm_on_clean(
     slm_finetune_lr: float = SLM_FINETUNE_LR,
     slm_finetune_weight_decay: float = SLM_FINETUNE_WEIGHT_DECAY,
     slm_finetune_min_samples: int = SLM_FINETUNE_MIN_SAMPLES,
-    val_texts: list = None,   
-    val_labels: list = None,  
 ) -> dict:
     """
     Conditionally fine-tune SLM on D_clean.
@@ -61,8 +59,6 @@ def maybe_finetune_slm_on_clean(
         batch_size=slm_finetune_batch_size,
         lr=slm_finetune_lr,
         weight_decay=slm_finetune_weight_decay,
-        val_texts=val_texts,     
-        val_labels=val_labels,    
     )
 
     if stats.get("trained", False):

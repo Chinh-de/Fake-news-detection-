@@ -206,8 +206,6 @@ class IntegratedSLM:
         lr: float = 2e-5,
         weight_decay: float = 0.01,
         early_stop: int = 5,
-        val_texts: list = None,
-        val_labels: list = None,
         save_path: str = None,
     ) -> dict:
         """Train the FTT detector with instance-weighted BCE loss.
@@ -236,11 +234,10 @@ class IntegratedSLM:
 
         # Preprocess texts
         clean_texts = [preprocess_text(t) for t in train_texts]
-        clean_val   = [preprocess_text(t) for t in val_texts] if val_texts else None
 
         best_f1   = 0.0
         no_improve = 0
-        history   = {"train_loss": [], "val_f1": []}
+        history   = {"train_loss": []}
 
         for epoch in range(epochs):
             self.model.train()
@@ -272,30 +269,15 @@ class IntegratedSLM:
 
             avg_loss = epoch_loss / max(1, n_batches)
             history["train_loss"].append(avg_loss)
+            print(f"[FTT] Epoch {epoch+1}/{epochs} | loss={avg_loss:.4f}")
 
-            # Validation / early-stop
-            val_f1 = 0.0
-            if clean_val is not None and val_labels is not None:
-                val_f1 = self._eval_f1(clean_val, val_labels)
-                history["val_f1"].append(val_f1)
-                print(f"[FTT] Epoch {epoch+1}/{epochs} | loss={avg_loss:.4f} | val_f1={val_f1:.4f}")
-
-                if val_f1 > best_f1:
-                    best_f1 = val_f1
-                    no_improve = 0
-                    if save_path:
-                        os.makedirs(save_path, exist_ok=True)
-                        torch.save(
-                            self.model.state_dict(),
-                            os.path.join(save_path, "parameter_bert.pkl"),
-                        )
-                else:
-                    no_improve += 1
-                    if no_improve >= early_stop:
-                        print(f"[FTT] Early stop at epoch {epoch+1}")
-                        break
-            else:
-                print(f"[FTT] Epoch {epoch+1}/{epochs} | loss={avg_loss:.4f}")
+            # Save checkpoint if save_path provided
+            if save_path:
+                os.makedirs(save_path, exist_ok=True)
+                torch.save(
+                    self.model.state_dict(),
+                    os.path.join(save_path, "parameter_bert.pkl"),
+                )
 
         # Load best checkpoint if saved
         ckpt = os.path.join(save_path, "parameter_bert.pkl") if save_path else None
@@ -308,9 +290,7 @@ class IntegratedSLM:
             "trained": True,
             "samples": len(train_texts),
             "epochs_run": epoch + 1,
-            "best_val_f1": best_f1,
             "train_loss_history": history["train_loss"],
-            "val_f1_history": history.get("val_f1", []),
         }
 
     def _eval_f1(self, texts: list, labels: list, batch_size: int = 64) -> float:
@@ -340,8 +320,6 @@ class IntegratedSLM:
         batch_size: int = 32,
         lr: float = 1e-6,
         weight_decay: float = 0.01,
-        val_texts: list = None,
-        val_labels: list = None,
     ) -> dict:
         """Fine-tune on MRCD clean pool with confidence-based weights.
 
@@ -359,12 +337,6 @@ class IntegratedSLM:
         labels  = [int(s["label"]) for s in valid]
         # Use SLM confidence as sample weight (preserves FTT spirit)
         weights = [float(s.get("conf_slm", 0.8)) for s in valid]
-
-        # Save pre-finetune state for possible rollback
-        pre_state = {k: v.clone() for k, v in self.model.state_dict().items()}
-        pre_f1 = None
-        if val_texts is not None and val_labels is not None:
-            pre_f1 = self._eval_f1(val_texts, val_labels)
 
         loss_fn   = InstanceWeightedBCELoss()
         optimizer = Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -391,19 +363,6 @@ class IntegratedSLM:
                 total_loss  += loss.item()
                 total_steps += 1
 
-        # Rollback if validation F1 dropped (prevents catastrophic forgetting)
-        rolled_back = False
-        post_f1 = None
-        if pre_f1 is not None:
-            self.model.eval()
-            post_f1 = self._eval_f1(val_texts, val_labels)
-            if post_f1 < pre_f1 - 0.01:  # allow tiny margin
-                self.model.load_state_dict(pre_state)
-                rolled_back = True
-                print(f"[MRCD] Rollback! val_f1 dropped {pre_f1:.4f} → {post_f1:.4f}")
-            else:
-                print(f"[MRCD] Finetune kept: val_f1 {pre_f1:.4f} → {post_f1:.4f}")
-
         self.model.eval()
         return {
             "trained": True,
@@ -413,9 +372,6 @@ class IntegratedSLM:
             "lr": lr,
             "weight_decay": weight_decay,
             "avg_loss": total_loss / max(1, total_steps),
-            "pre_f1": pre_f1,
-            "post_f1": post_f1,
-            "rolled_back": rolled_back,
         }
 
     def _eval_f1(self, texts: list, labels: list) -> float:

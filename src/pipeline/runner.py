@@ -286,8 +286,6 @@ def run_mrcd_pipeline(
             slm_finetune_lr=slm_finetune_lr,
             slm_finetune_weight_decay=slm_finetune_weight_decay,
             slm_finetune_min_samples=slm_finetune_min_samples,
-            val_texts=events,             
-            val_labels=ground_truth,
         )
         finetune_history.append({"round": round_id, **ft_stats})
 
