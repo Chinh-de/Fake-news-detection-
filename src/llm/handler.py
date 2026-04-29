@@ -11,7 +11,6 @@ from src.config import (
     LLM_MAX_NEW_TOKENS,
     LLM_TEMPERATURE,
     LLM_TOP_P,
-    LLM_BACKEND,
 )
 from src.llm.base import BaseLLM
 
