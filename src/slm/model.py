@@ -315,9 +315,9 @@ class IntegratedSLM:
     def finetune_on_clean(
         self,
         clean_samples: list,
-        epochs: int = 4,
+        epochs: int = 2,
         batch_size: int = 32,
-        lr: float = 1e-6,
+        lr: float = 5e-6,
         weight_decay: float = 0.01,
     ) -> dict:
         """Fine-tune on MRCD clean pool with confidence-based weights.
