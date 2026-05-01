@@ -57,7 +57,7 @@ SLM_BACKEND = os.environ.get("SLM_BACKEND", "hf")
 # ============================================================
 # Pipeline Hyperparameters
 # ============================================================
-CONFIDENCE_THRESHOLD = 0.8
+CONFIDENCE_THRESHOLD = 0.7
 NUM_LOOP = 3
 TOP_K_DEMOS = 4
 FACT_TOP_K = 3
