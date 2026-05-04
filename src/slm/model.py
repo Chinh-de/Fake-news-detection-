@@ -173,8 +173,8 @@ class IntegratedSLM:
         train_weights: list,
         epochs: int = 10,
         batch_size: int = 32,
-        lr: float = 2e-3,          # Tăng learning rate vì chỉ train MLP (ít tham số)
-        weight_decay: float = 0.01,
+        lr: float = 1e-3,          # Tăng learning rate vì chỉ train MLP (ít tham số)
+        weight_decay: float = 1e-4,
         save_path: str = None,
     ) -> dict:
         """Train only the MLP head with instance-weighted BCE loss."""
@@ -244,7 +244,7 @@ class IntegratedSLM:
         epochs: int = 2,
         batch_size: int = 32,
         lr: float = 1e-3,          # Learning rate cho MLP (cao hơn full fine-tune)
-        weight_decay: float = 0.01,
+        weight_decay: float = 1e-4,
     ) -> dict:
         """Fine-tune only the MLP head on clean pool with confidence-based weights."""
         valid = [s for s in clean_samples if s.get("text") and s.get("label") in [0, 1]]
