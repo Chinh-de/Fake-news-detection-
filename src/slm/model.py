@@ -167,7 +167,10 @@ class IntegratedSLM:
             truncation=True,
             return_tensors="pt",
         )
-        return {k: v.to(self.device) for k, v in enc.items()}
+        return {
+            'content': enc['input_ids'].to(self.device),
+            'content_masks': enc['attention_mask'].to(self.device)
+        }
 
     # ================================================================
     # Inference
