@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from transformers import RobertaModel, RobertaTokenizer
+from transformers import get_linear_schedule_with_warmup
 
 from src.config import MODEL_PATH, SLM_BACKEND
 from src.utils import preprocess_text
@@ -176,20 +177,25 @@ class IntegratedSLM:
         train_weights: list,
         epochs: int = 10,
         batch_size: int = 32,
-        lr: float = 1e-3,          # Learning rate cho MLP
+        lr: float = 1e-3,
         weight_decay: float = 1e-4,
+        warmup_ratio: float = 0.1,
+        max_grad_norm: float = 1.0,
         save_path: str = None,
     ) -> dict:
-        """Train only the MLP head with instance-weighted BCE loss."""
-
         assert len(train_texts) == len(train_labels) == len(train_weights), \
             "texts, labels and weights must have the same length"
 
         trainable_params = self.model.mlp.parameters()
         optimizer = Adam(trainable_params, lr=lr, weight_decay=weight_decay)
-        loss_fn = InstanceWeightedBCELoss()
 
+        # Tính số bước
         clean_texts = [preprocess_text(t) for t in train_texts]
+        total_steps = (len(clean_texts) // batch_size) * epochs
+        warmup_steps = int(total_steps * warmup_ratio)
+        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
+
+        loss_fn = InstanceWeightedBCELoss()
         history = {"train_loss": []}
 
         for epoch in range(epochs):
@@ -210,14 +216,17 @@ class IntegratedSLM:
 
                 optimizer.zero_grad()
                 loss.backward()
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm)
                 optimizer.step()
+                scheduler.step()
 
                 epoch_loss += loss.item()
                 n_batches += 1
 
             avg_loss = epoch_loss / max(1, n_batches)
             history["train_loss"].append(avg_loss)
-            print(f"[FTT] Epoch {epoch+1}/{epochs} | loss={avg_loss:.4f} (training only MLP)")
+            print(f"[FTT] Epoch {epoch+1}/{epochs} | loss={avg_loss:.4f} (training only MLP, lr={scheduler.get_last_lr()[0]:.2e})")
 
             if save_path:
                 os.makedirs(save_path, exist_ok=True)
@@ -235,8 +244,9 @@ class IntegratedSLM:
             "samples": len(train_texts),
             "epochs_run": epoch + 1,
             "train_loss_history": history["train_loss"],
+            "warmup_ratio": warmup_ratio,
+            "max_grad_norm": max_grad_norm,
         }
-
     # ================================================================
     # MRCD fine-tuning on D_clean (chỉ train MLP)
     # ================================================================
@@ -247,8 +257,9 @@ class IntegratedSLM:
         batch_size: int = 32,
         lr: float = 1e-3,
         weight_decay: float = 1e-4,
+        warmup_ratio: float = 0.1,
+        max_grad_norm: float = 1.0,
     ) -> dict:
-        """Fine-tune only the MLP head on clean pool with confidence-based weights."""
         valid = [s for s in clean_samples if s.get("text") and s.get("label") in [0, 1]]
         if not valid:
             return {"trained": False, "reason": "no_valid_samples"}
@@ -259,13 +270,18 @@ class IntegratedSLM:
 
         loss_fn = InstanceWeightedBCELoss()
         optimizer = Adam(self.model.mlp.parameters(), lr=lr, weight_decay=weight_decay)
-        total_loss, total_steps = 0.0, 0
+
+        total_steps = (len(texts) // batch_size) * epochs
+        warmup_steps = int(total_steps * warmup_ratio)
+        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
+
+        total_loss, total_steps_done = 0.0, 0
 
         for _ in range(epochs):
             self.model.train()
             idx = np.random.permutation(len(texts)).tolist()
             for start in range(0, len(idx), batch_size):
-                batch_idx = idx[start:start + batch_size]
+                batch_idx = idx[start:start+batch_size]
                 batch_texts   = [texts[i] for i in batch_idx]
                 batch_labels  = torch.tensor([labels[i] for i in batch_idx], dtype=torch.float, device=self.device)
                 batch_weights = torch.tensor([weights[i] for i in batch_idx], dtype=torch.float, device=self.device)
@@ -276,11 +292,12 @@ class IntegratedSLM:
 
                 optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.mlp.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(self.model.mlp.parameters(), max_grad_norm)
                 optimizer.step()
+                scheduler.step()
 
                 total_loss += loss.item()
-                total_steps += 1
+                total_steps_done += 1
 
         self.model.eval()
         return {
@@ -290,9 +307,10 @@ class IntegratedSLM:
             "batch_size": batch_size,
             "lr": lr,
             "weight_decay": weight_decay,
-            "avg_loss": total_loss / max(1, total_steps),
+            "warmup_ratio": warmup_ratio,
+            "max_grad_norm": max_grad_norm,
+            "avg_loss": total_loss / max(1, total_steps_done),
         }
-
     # ================================================================
     # Helper functions (giữ nguyên)
     # ================================================================
