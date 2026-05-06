@@ -253,9 +253,9 @@ class IntegratedSLM:
     def finetune_on_clean(
         self,
         clean_samples: list,
-        epochs: int = 2,
+        epochs: int = 1,
         batch_size: int = 32,
-        lr: float = 1e-3,
+        lr: float = 1e-4,
         weight_decay: float = 1e-4,
         warmup_ratio: float = 0.1,
         max_grad_norm: float = 1.0,
