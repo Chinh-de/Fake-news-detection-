@@ -93,6 +93,8 @@ WIKI_FETCH_FULL = os.environ.get("MRCD_WIKI_FETCH_FULL", "false").lower() == "tr
 # ============================================================
 AG_NEWS_URL = "https://raw.githubusercontent.com/mhjabreel/CharCnn_Keras/master/data/ag_news_csv/train.csv"
 
+RERANKER_THRESHOLD = float(os.environ.get("MRCD_RERANKER_THRESHOLD", 2.0))
+
 TRUST_DOMAINS = [
     "apnews.com",
     "reuters.com",

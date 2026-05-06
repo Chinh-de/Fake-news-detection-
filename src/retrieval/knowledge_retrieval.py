@@ -21,6 +21,7 @@ from src.config import (
     LLM_MAX_OUTPUT_TOKENS_EXTRACTION,
     CRAWL_MAX_WORKERS,
 )
+import src.config as cfg
 from src.utils import clean_query, truncate_text, log_retrieval_to_csv
 from src.prompts import build_dual_extraction_prompt, build_entity_extraction_prompt
 from src.llm.handler import get_llm
@@ -305,7 +306,7 @@ def retrieve_fact_evidence(
     raw_query: str,
     max_urls: int = 12,
     top_k_chunks: int = 3,
-    similarity_threshold: float = 4.0,
+    similarity_threshold: float = None,
     crawl_max_workers: int = CRAWL_MAX_WORKERS,
 ) -> dict:
     """
@@ -324,6 +325,8 @@ def retrieve_fact_evidence(
     7. Lấy top-k chunk có điểm cao nhất.
     8. Trả về dictionary chứa thông tin phân tích và các chunks hàng đầu.
     """
+    if similarity_threshold is None:
+        similarity_threshold = cfg.RERANKER_THRESHOLD
     analysis = analyze_claim_entities_and_query(raw_query)
     query = analysis.get(
         "query", truncate_text(clean_query(raw_query), max_length=80)

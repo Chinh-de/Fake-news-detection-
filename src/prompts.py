@@ -14,19 +14,27 @@ def build_dual_extraction_prompt(text: str) -> str:
     Xây dựng prompt để thực hiện đồng thời việc trích xuất thực thể (entities) và tạo truy vấn tìm kiếm trung lập (neutral query).
     """
     prompt = (
-        "You are an expert Fact-Checking Extraction Agent. Your task is to process a raw news text "
-        "and generate two outputs simultaneously for a Two-Stage Retrieval System.\n\n"
+        "You are an expert Fact-Checking Extraction Agent analyzing a social media (Twitter) post. "
+        "Your task is to process the raw text and generate two outputs simultaneously for a Two-Stage Retrieval System.\n\n"
+        
         "TASK 1: WIKI ENTITIES (For Knowledge Retrieval)\n"
-        "Extract 1 to 4 core named entities (People, Organizations, Locations, Events) from the text "
+        "Extract 1 to 4 core named entities (People, Organizations, Locations, Specific Events) from the text "
         "that are crucial for verifying the claim and are highly likely to have a Wikipedia page.\n\n"
-        "TASK 2: NEUTRAL QUERY (For Fact-Check Search)\n"
-        "Generate a single, concise search query to retrieve factual articles. "
-        "STRICT RULES: Focus ONLY on factual core subjects. REMOVE all clickbait, sensational, "
-        "or emotional words (e.g., 'breaking', 'urgent', 'cure', 'secret'). "
-        "DO NOT use quotation marks (\"\") or any search operators.\n\n"
+        
+        "TASK 2: NEWS SEARCH QUERY (For Exact Event Matching)\n"
+        "Generate a single, concise search query specifically designed to retrieve mainstream news articles "
+        "that directly report on the exact event or claim described in the post.\n"
+        "STRICT RULES:\n"
+        "- Capture the specific action, context, or incident (e.g., 'arrested', 'bankrupt', 'protest'), not just the entity names.\n"
+        "- Translate informal social media language, slang, or abbreviations into formal journalistic keywords.\n"
+        "- REMOVE all hashtags, emojis, clickbait, sensational, or emotional words (e.g., 'breaking', 'shocking', 'omg').\n"
+        "- DO NOT use quotation marks (\"\") or any search operators.\n"
+        "- The query should read like a factual, objective news headline summary.\n\n"
+        
         "OUTPUT FORMAT:\n"
         "Return ONLY a valid JSON object. Do NOT wrap in markdown tags (like ```json), no preamble, no explanations.\n"
-        'Schema: {"entities": ["entity_1", "entity_2"], "query": "query"}\n\n'
+        'Schema: {"entities": ["entity_1", "entity_2"], "query": "exact event news search query"}\n\n'
+        
         f"Input text: {text}"
     )
     return prompt
