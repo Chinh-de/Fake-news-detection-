@@ -29,7 +29,7 @@ TEST_CSV = os.path.join(DATA_DIR, "test.csv")
 # SLM model path (pre-trained checkpoint)
 MODEL_PATH = os.environ.get(
     "MRCD_MODEL_PATH",
-    "bert-base-uncased",  # Changed from RoBERTa to BERT for EANN
+    "roberta-base",  # Changed from RoBERTa to BERT for EANN
 )
 
 # ============================================================

@@ -1,7 +1,7 @@
 """
-Integrated SLM (Small Language Model) wrapper — FTT edition (Feature Extractor Mode).
-Fake-news detector based on the FTT-ACL23 BERT model:
-    BERT (frozen) + Average Pooling + MLP binary head
+Integrated SLM (Small Language Model) wrapper — FTT edition with RoBERTa (Feature Extractor Mode).
+Fake-news detector based on the FTT-ACL23 architecture but using RoBERTa:
+    RoBERTa (frozen) + Average Pooling + MLP binary head
     trained with instance-weighted cross-entropy loss.
 Only the MLP head is trainable.
 """
@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from transformers import BertModel, BertTokenizer
+from transformers import RobertaModel, RobertaTokenizer
 
 from src.config import MODEL_PATH, SLM_BACKEND
 from src.utils import preprocess_text
@@ -42,20 +42,20 @@ class MLP(nn.Module):
 
 
 # ============================================================
-# Core FTT Model (Feature Extractor: BERT frozen, MLP trainable)
+# Core FTT Model (RoBERTa frozen, MLP trainable)
 # ============================================================
 
-class FTTBertModel(nn.Module):
-    """BERT (frozen) + Average Pooling + MLP binary classifier.
+class FTTRobertaModel(nn.Module):
+    """RoBERTa (frozen) + Average Pooling + MLP binary classifier.
 
-    - BERT is frozen (feature extractor)
+    - RoBERTa is frozen (feature extractor)
     - MLP is trainable
     """
-    def __init__(self, emb_dim: int, mlp_dims: list, dropout: float, bert_path: str):
+    def __init__(self, emb_dim: int, mlp_dims: list, dropout: float, roberta_path: str):
         super().__init__()
-        self.bert = BertModel.from_pretrained(bert_path)
-        # Đóng băng toàn bộ BERT (feature extractor)
-        for param in self.bert.parameters():
+        self.roberta = RobertaModel.from_pretrained(roberta_path)
+        # Đóng băng toàn bộ RoBERTa (feature extractor)
+        for param in self.roberta.parameters():
             param.requires_grad = False
 
         self.mlp = MLP(emb_dim, mlp_dims, dropout)
@@ -64,12 +64,12 @@ class FTTBertModel(nn.Module):
         inputs = kwargs["content"]           # (B, seq_len)
         masks  = kwargs["content_masks"]     # (B, seq_len)
 
-        with torch.no_grad():  # BERT hoàn toàn không tính gradient
-            bert_out = self.bert(inputs, attention_mask=masks)[0]   # (B, seq_len, H)
+        with torch.no_grad():  # RoBERTa hoàn toàn không tính gradient
+            roberta_out = self.roberta(inputs, attention_mask=masks)[0]   # (B, seq_len, H)
 
         # Average pooling over non-padded tokens
-        mask_expanded = masks.unsqueeze(-1).expand(bert_out.size()).float()
-        sum_embeddings = torch.sum(bert_out * mask_expanded, dim=1)
+        mask_expanded = masks.unsqueeze(-1).expand(roberta_out.size()).float()
+        sum_embeddings = torch.sum(roberta_out * mask_expanded, dim=1)
         sum_mask = torch.sum(mask_expanded, dim=1)
         pooled = sum_embeddings / sum_mask.clamp(min=1e-9)
 
@@ -93,11 +93,11 @@ class InstanceWeightedBCELoss(nn.Module):
 
 
 # ============================================================
-# IntegratedSLM wrapper (chỉ train MLP)
+# IntegratedSLM wrapper (chỉ train MLP, dùng RoBERTa)
 # ============================================================
 
 class IntegratedSLM:
-    """FTT-based SLM wrapper with inference and fine-tuning (Feature Extractor Mode)."""
+    """FTT-based SLM wrapper with inference and fine-tuning (Feature Extractor Mode) using RoBERTa."""
 
     def __init__(self, model_path: str = MODEL_PATH, backend: str = None):
         self.backend = backend or SLM_BACKEND
@@ -109,17 +109,17 @@ class IntegratedSLM:
         self._init_model(resolved)
 
     def _init_model(self, model_path: str):
-        self.tokenizer = BertTokenizer.from_pretrained(model_path)
-        self.model = FTTBertModel(
+        self.tokenizer = RobertaTokenizer.from_pretrained(model_path)
+        self.model = FTTRobertaModel(
             emb_dim=768,
             mlp_dims=[384],   # matches FTT-ACL23 default
             dropout=0.2,
-            bert_path=model_path,
+            roberta_path=model_path,
         )
         self.model.to(self.device)
         self.model.eval()
         self._loaded_model_path = model_path
-        print(f"[FTT-SLM] Model loaded on {self.device} (feature extractor mode: BERT frozen)")
+        print(f"[FTT-SLM] Model loaded on {self.device} (feature extractor mode: RoBERTa frozen)")
 
     def _tokenise(self, texts: list, max_length: int = 170):
         enc = self.tokenizer(
@@ -129,6 +129,9 @@ class IntegratedSLM:
             truncation=True,
             return_tensors="pt",
         )
+        # RoBERTa không dùng token_type_ids
+        if "token_type_ids" in enc:
+            del enc["token_type_ids"]
         return {k: v.to(self.device) for k, v in enc.items()}
 
     # ================================================================
@@ -173,7 +176,7 @@ class IntegratedSLM:
         train_weights: list,
         epochs: int = 10,
         batch_size: int = 32,
-        lr: float = 1e-3,          # Tăng learning rate vì chỉ train MLP (ít tham số)
+        lr: float = 1e-3,          # Learning rate cho MLP
         weight_decay: float = 1e-4,
         save_path: str = None,
     ) -> dict:
@@ -182,7 +185,6 @@ class IntegratedSLM:
         assert len(train_texts) == len(train_labels) == len(train_weights), \
             "texts, labels and weights must have the same length"
 
-        # Chỉ lấy các tham số của MLP (phần classification head)
         trainable_params = self.model.mlp.parameters()
         optimizer = Adam(trainable_params, lr=lr, weight_decay=weight_decay)
         loss_fn = InstanceWeightedBCELoss()
@@ -243,7 +245,7 @@ class IntegratedSLM:
         clean_samples: list,
         epochs: int = 2,
         batch_size: int = 32,
-        lr: float = 1e-3,          # Learning rate cho MLP (cao hơn full fine-tune)
+        lr: float = 1e-3,
         weight_decay: float = 1e-4,
     ) -> dict:
         """Fine-tune only the MLP head on clean pool with confidence-based weights."""
@@ -256,7 +258,6 @@ class IntegratedSLM:
         weights = [float(s.get("conf_slm", 0.8)) for s in valid]
 
         loss_fn = InstanceWeightedBCELoss()
-        # Chỉ train MLP
         optimizer = Adam(self.model.mlp.parameters(), lr=lr, weight_decay=weight_decay)
         total_loss, total_steps = 0.0, 0
 
