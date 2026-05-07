@@ -186,6 +186,8 @@ class IntegratedSLM:
 		if not valid_samples:
 			return {"trained": False, "reason": "no_valid_samples"}
 
+		print(f"\n[SLM Fine-tune on clean] INIT: clean_samples={len(valid_samples)}, epochs={epochs}, batch_size={batch_size}, lr={lr}")
+
 		texts = [preprocess_text(s["text"]) for s in valid_samples]
 		labels = [int(s["label"]) for s in valid_samples]
 
@@ -263,7 +265,9 @@ class IntegratedSLM:
 			raise ValueError("train_texts và train_labels phải cùng số lượng")
 		if len(train_texts) == 0:
 			return {"trained": False, "reason": "no_train_data"}
-
+			
+		print(f"\n[SLM Fine-tune] INIT: train_samples={len(train_texts)}, epochs={epochs}, batch_size={batch_size}, lr={lr}")
+		
 		if self._loaded_model_path != model_init:
 			self.tokenizer, self.model = self._load_roberta_components(
 				model_path=model_init,
