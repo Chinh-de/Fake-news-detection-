@@ -76,6 +76,8 @@ SLM_FINETUNE_BATCH_SIZE = 32
 SLM_FINETUNE_LR = 1e-5
 SLM_FINETUNE_WEIGHT_DECAY = 0.01
 SLM_FINETUNE_MIN_SAMPLES = 16
+SLM_FINETUNE_WARMUP_STEPS = 500
+SLM_FINETUNE_EARLY_STOPPING_PATIENCE = 2
 
 # ============================================================
 # Knowledge Retrieval Mode

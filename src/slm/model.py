@@ -13,11 +13,16 @@ import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
+import numpy as np
 from transformers import (
 	RobertaForSequenceClassification,
 	RobertaTokenizer,
 	get_linear_schedule_with_warmup,
+	TrainingArguments,
+	Trainer,
+	EarlyStoppingCallback,
 )
+import evaluate
 
 from src.config import MODEL_PATH, SLM_BACKEND
 from src.slm.dataset import FakeNewsDataset
@@ -177,7 +182,13 @@ class IntegratedSLM:
 		batch_size: int = 32,
 		lr: float = 1e-5,
 		weight_decay: float = 0.01,
+		warmup_steps: int = 500,
+		early_stopping_patience: int = 2,
 	) -> dict:
+		"""
+		Fine-tune trên D_clean với HuggingFace Trainer API.
+		Sử dụng feature extractor approach (đóng băng backbone, train head).
+		"""
 		valid_samples = [
 			s
 			for s in clean_samples
@@ -247,19 +258,22 @@ class IntegratedSLM:
 		train_texts: list[str],
 		train_labels: list[int],
 		model_init: str = "roberta-base",
-		epochs: int = 4,
+		epochs: int = 50,
 		batch_size: int = 32,
 		lr: float = 1e-3,
-		weight_decay: float = 1e-4,
-		warmup_ratio: float = 0.1,
-		max_grad_norm: float = 1.0,
+		weight_decay: float = 0.01,
+		warmup_steps: int = 500,
+		early_stopping_patience: int = 2,
+		val_texts: list[str] | None = None,
+		val_labels: list[int] | None = None,
 		save_path: str | None = None,
 	) -> dict:
 		"""
-		Fine-tune nhị phân với cấu hình feature extractor:
+		Fine-tune with HuggingFace Trainer API (feature extractor approach):
 		- Freeze toàn bộ backbone RoBERTa.
 		- Chỉ huấn luyện classification head.
-		- AdamW, lr=1e-3, weight_decay=1e-4, batch_size=32.
+		- Hỗ trợ validation set và early stopping.
+		- AdamW, eval_strategy="epoch", save_strategy="epoch".
 		"""
 		if len(train_texts) != len(train_labels):
 			raise ValueError("train_texts và train_labels phải cùng số lượng")
@@ -268,69 +282,77 @@ class IntegratedSLM:
 			
 		print(f"\n[SLM Fine-tune] INIT: train_samples={len(train_texts)}, epochs={epochs}, batch_size={batch_size}, lr={lr}")
 		
+		# Load model
 		if self._loaded_model_path != model_init:
 			self.tokenizer, self.model = self._load_roberta_components(
 				model_path=model_init,
-				eval_mode=True,
+				eval_mode=False,
 			)
 			self._loaded_model_path = model_init
 
+		# Freeze backbone, train only head
 		self._freeze_backbone_train_head_only()
 
-		train_dataset = FakeNewsDataset(train_texts, train_labels, self.tokenizer, max_len=128)
-		train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+		# Prepare datasets
+		train_texts_clean = [preprocess_text(t) for t in train_texts]
+		train_dataset = FakeNewsDataset(train_texts_clean, train_labels, self.tokenizer, max_len=128)
+		
+		eval_dataset = None
+		if val_texts is not None and val_labels is not None:
+			if len(val_texts) != len(val_labels):
+				raise ValueError("val_texts và val_labels phải cùng số lượng")
+			val_texts_clean = [preprocess_text(t) for t in val_texts]
+			eval_dataset = FakeNewsDataset(val_texts_clean, val_labels, self.tokenizer, max_len=128)
+			print(f"Validation dataset: {len(eval_dataset)} samples")
 
-		total_steps = len(train_loader) * epochs
-		trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-		optimizer = AdamW(trainable_params, lr=lr, weight_decay=weight_decay)
-		scheduler = get_linear_schedule_with_warmup(
-			optimizer,
-			num_warmup_steps=int(total_steps * warmup_ratio),
-			num_training_steps=total_steps,
+		# Compute metrics function
+		metric_f1 = evaluate.load("f1")
+		metric_acc = evaluate.load("accuracy")
+		
+		def compute_metrics(eval_pred):
+			logits, labels = eval_pred
+			predictions = np.argmax(logits, axis=-1)
+			f1 = metric_f1.compute(predictions=predictions, references=labels, average="weighted")
+			acc = metric_acc.compute(predictions=predictions, references=labels)
+			return {**f1, **acc}
+
+		# Training arguments
+		output_dir = save_path or "./results_slm_finetune"
+		training_args = TrainingArguments(
+			output_dir=output_dir,
+			num_train_epochs=epochs,
+			per_device_train_batch_size=batch_size,
+			per_device_eval_batch_size=64,
+			learning_rate=lr,
+			weight_decay=weight_decay,
+			optim="adamw_torch",
+			warmup_steps=warmup_steps,
+			logging_dir="./logs_slm",
+			logging_steps=50,
+			eval_strategy="epoch" if eval_dataset else "no",
+			save_strategy="epoch" if eval_dataset else "no",
+			load_best_model_at_end=eval_dataset is not None,
+			metric_for_best_model="eval_loss" if eval_dataset else None,
+			greater_is_better=False,
+			save_total_limit=2,
 		)
 
-		label_counts = torch.tensor(
-			[
-				sum(1 for l in train_labels if l == 0),
-				sum(1 for l in train_labels if l == 1),
-			],
-			dtype=torch.float,
+		# Trainer with callbacks
+		callbacks = []
+		if eval_dataset:
+			callbacks.append(EarlyStoppingCallback(early_stopping_patience=early_stopping_patience))
+
+		trainer = Trainer(
+			model=self.model,
+			args=training_args,
+			train_dataset=train_dataset,
+			eval_dataset=eval_dataset,
+			compute_metrics=compute_metrics if eval_dataset else None,
+			callbacks=callbacks,
 		)
-		class_weights = (label_counts.sum() / (2 * label_counts.clamp(min=1))).to(self.device)
-		loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights)
 
-		history = {"train_loss": []}
-
-		for _ in range(epochs):
-			epoch_loss = 0.0
-			self._set_head_train_mode()
-
-			for batch in train_loader:
-				input_ids = batch["input_ids"].to(self.device)
-				attention_mask = batch["attention_mask"].to(self.device)
-				labels_t = batch["labels"].to(self.device)
-
-				optimizer.zero_grad()
-				outputs = self.model(
-					input_ids=input_ids,
-					attention_mask=attention_mask,
-				)
-				loss = loss_fn(outputs.logits, labels_t)
-				loss.backward()
-				torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm)
-				optimizer.step()
-				scheduler.step()
-
-				epoch_loss += float(loss.item())
-
-			avg_train_loss = epoch_loss / max(1, len(train_loader))
-			history["train_loss"].append(avg_train_loss)
-
-		if save_path:
-			os.makedirs(save_path, exist_ok=True)
-			self.model.save_pretrained(save_path)
-			self.tokenizer.save_pretrained(save_path)
-
+		# Train
+		trainer.train()
 		self.model.eval()
 
 		result = {
@@ -340,7 +362,8 @@ class IntegratedSLM:
 			"batch_size": batch_size,
 			"lr": lr,
 			"weight_decay": weight_decay,
-			"train_loss_history": history["train_loss"],
+			"warmup_steps": warmup_steps,
+			"val_samples": len(val_texts) if val_texts else None,
 		}
 		if save_path:
 			result["save_path"] = save_path
@@ -352,12 +375,14 @@ class IntegratedSLM:
 		train_texts: list[str],
 		train_labels: list[int],
 		model_init: str = "roberta-base",
-		epochs: int = 4,
+		epochs: int = 50,
 		batch_size: int = 32,
 		lr: float = 1e-3,
-		weight_decay: float = 1e-4,
-		warmup_ratio: float = 0.1,
-		max_grad_norm: float = 1.0,
+		weight_decay: float = 0.01,
+		warmup_steps: int = 500,
+		early_stopping_patience: int = 2,
+		val_texts: list[str] | None = None,
+		val_labels: list[int] | None = None,
 		save_path: str | None = None,
 	) -> dict:
 		"""
@@ -371,7 +396,9 @@ class IntegratedSLM:
 			batch_size=batch_size,
 			lr=lr,
 			weight_decay=weight_decay,
-			warmup_ratio=warmup_ratio,
-			max_grad_norm=max_grad_norm,
+			warmup_steps=warmup_steps,
+			early_stopping_patience=early_stopping_patience,
+			val_texts=val_texts,
+			val_labels=val_labels,
 			save_path=save_path,
 		)

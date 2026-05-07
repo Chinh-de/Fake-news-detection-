@@ -10,6 +10,8 @@ from src.config import (
     SLM_FINETUNE_LR,
     SLM_FINETUNE_WEIGHT_DECAY,
     SLM_FINETUNE_MIN_SAMPLES,
+    SLM_FINETUNE_WARMUP_STEPS,
+    SLM_FINETUNE_EARLY_STOPPING_PATIENCE,
 )
 
 
@@ -23,6 +25,8 @@ def maybe_finetune_slm_on_clean(
     slm_finetune_lr: float = SLM_FINETUNE_LR,
     slm_finetune_weight_decay: float = SLM_FINETUNE_WEIGHT_DECAY,
     slm_finetune_min_samples: int = SLM_FINETUNE_MIN_SAMPLES,
+    slm_finetune_warmup_steps: int = SLM_FINETUNE_WARMUP_STEPS,
+    slm_finetune_early_stopping_patience: int = SLM_FINETUNE_EARLY_STOPPING_PATIENCE,
 ) -> dict:
     """
     Conditionally fine-tune SLM on D_clean.
@@ -59,6 +63,8 @@ def maybe_finetune_slm_on_clean(
         batch_size=slm_finetune_batch_size,
         lr=slm_finetune_lr,
         weight_decay=slm_finetune_weight_decay,
+        warmup_steps=slm_finetune_warmup_steps,
+        early_stopping_patience=slm_finetune_early_stopping_patience,
     )
 
     if stats.get("trained", False):
